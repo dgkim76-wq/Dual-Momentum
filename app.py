@@ -8,12 +8,16 @@ from datetime import datetime
 # ----------------------------------------------------
 st.set_page_config(page_title="듀얼 모멘텀 실행기", layout="wide")
 
+# 누락되었던 전체 투자 유니버스 종목 코드 완벽 반영
 UNIVERSE = {
     "266370": "KODEX 200IT",
     "411060": "ACE KRX금현물",
     "360200": "TIGER 미국S&P500",
-    "380340": "TIGER 인도니프티50"
+    "458730": "ACE 미국배당다우존스",
+    "380340": "TIGER 인도니프티50",
+    "432320": "ACE 미국30년국채액티브(H)"
 }
+
 SAFE_TICKER = "329750"
 SAFE_NAME = "TIGER 미국달러단기채권액티브"
 
