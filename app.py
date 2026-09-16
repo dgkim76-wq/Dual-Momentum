@@ -1,13 +1,185 @@
-st.divider()
+도경님, 파이썬(Python)은 코드의 들여쓰기(띄어쓰기 공간)에 매우 민감한 언어입니다. 부분 코드를 복사해서 기존 코드의 중간에 붙여넣는 과정에서 **줄 맞춤(Indentation)이 어긋나서 발생한 오류**입니다.
+
+이러한 들여쓰기 충돌을 가장 깔끔하고 확실하게 해결하기 위해, 방금 확정한 **'달러단기채권 대피 고정 로직'까지 모두 포함된 `app.py` 전체 완성본 코드**를 제공해 드립니다.
+
+기존 `app.py` 화면에서 `Ctrl + A`를 눌러 전체를 선택하고 삭제(`Delete`)하신 뒤, 아래의 코드를 처음부터 끝까지 통째로 복사해서 붙여넣고 저장(`Ctrl + S`)해 주십시오.
+
+```python
+import streamlit as st
+import pandas as pd
+import FinanceDataReader as fdr
+from datetime import datetime
+
+# ----------------------------------------------------
+# 1. 환경 설정 및 유니버스 정의
+# ----------------------------------------------------
+st.set_page_config(page_title="듀얼 모멘텀 실행기", layout="wide")
+
+# 공격 자산 유니버스
+UNIVERSE = {
+    "363580": "KODEX 200IT TR",
+    "411060": "ACE KRX금현물",
+    "360200": "TIGER 미국S&P500",
+    "402970": "ACE 미국배당다우존스",
+    "453870": "TIGER 인도니프티50"
+}
+# 수비/안전자산 유니버스
+SAFE_ASSETS = {
+    "329750": "TIGER 미국달러단기채권액티브",
+    "453850": "ACE 미국30년국채액티브(H)"
+}
+
+# ----------------------------------------------------
+# 2. 기준일 연동 데이터 수집 엔진 (타임머신 기능 적용)
+# ----------------------------------------------------
+@st.cache_data(ttl=60)
+def get_market_timing(ticker, target_date):
+    try:
+        df = fdr.DataReader(ticker, start='2020-01-01')
+        df = df.dropna()
+        if df.empty: return 0.0, 0.0, None
+        
+        df['MA60'] = df['Close'].rolling(window=60).mean()
+        
+        target_dt = pd.to_datetime(target_date)
+        df_target = df.loc[:target_dt]
+        
+        if df_target.empty: return 0.0, 0.0, None
+        
+        latest_close = float(df_target['Close'].iloc[-1])
+        latest_ma60 = float(df_target['MA60'].dropna().iloc[-1])
+        
+        df_chart = df_target.tail(120)[['Close', 'MA60']]
+        df_chart.columns = ['지수 (Close)', '60일선 (MA60)']
+        
+        return latest_close, latest_ma60, df_chart
+    except:
+        return 0.0, 0.0, None
+
+@st.cache_data(ttl=60)
+def analyze_asset(ticker, name, target_date, is_safe=False):
+    try:
+        df = fdr.DataReader(ticker, start='2020-01-01')
+        df = df.dropna()
+        
+        df['MA60'] = df['Close'].rolling(window=60).mean()
+        
+        target_dt = pd.to_datetime(target_date)
+        df_target = df.loc[:target_dt]
+        
+        if df_target.empty or len(df_target) < 252: return None
+            
+        current_price = int(df_target['Close'].iloc[-1])
+        ma60 = df_target['MA60'].iloc[-1]
+        
+        def get_return(days):
+            if len(df_target) > days:
+                past_price = df_target['Close'].iloc[-days-1]
+                return ((current_price - past_price) / past_price) * 100
+            return 0.0
+            
+        ret_3m = get_return(63)
+        ret_6m = get_return(126)
+        ret_9m = get_return(189)
+        ret_12m = get_return(252)
+        
+        wms = (ret_3m * 9 + ret_6m * 6 + ret_9m * 3 + ret_12m * 1) / 19
+        
+        is_uptrend = current_price >= ma60
+        is_positive_wms = wms > 0
+        
+        passed = True if is_safe else (is_uptrend and is_positive_wms)
+
+        return {
+            "Ticker": ticker, "Name": name, "Price": current_price, "MA60": ma60,
+            "Ret_3M": ret_3m, "WMS": wms, "Passed": passed,
+            "IsUptrend": is_uptrend, "IsPosWMS": is_positive_wms, "IsSafe": is_safe
+        }
+    except:
+        return None
+
+# ----------------------------------------------------
+# 3. 사이드바 및 대시보드 UI
+# ----------------------------------------------------
+st.title("📈 듀얼 모멘텀 & 마켓 타이밍 실행기")
+
+st.sidebar.header("포트폴리오 기초 설정")
+target_date = st.sidebar.date_input("리밸런싱 기준일", datetime.today())
+total_cash = st.sidebar.number_input("매수 가능 예수금 (원)", min_value=0, value=10000000, step=1000000)
+st.sidebar.success(f"설정 금액: **{total_cash:,} 원**")
+
+tab1, tab2 = st.tabs(["🔴 일일 리스크 체크 (시장 전체 추세)", "📅 월간 리밸런싱 (동적 자산배분 실행)"])
+
+with tab1:
+    st.subheader(f"글로벌 주요 지수 현황 (기준일: {target_date})")
+    with st.spinner('지수 차트 및 실시간 데이터를 불러오는 중입니다...'):
+        kospi_price, kospi_ma, kospi_chart = get_market_timing("KS11", target_date)
+        kosdaq_price, kosdaq_ma, kosdaq_chart = get_market_timing("KQ11", target_date)
+        sp500_price, sp500_ma, sp500_chart = get_market_timing("US500", target_date)
+
+    col1, col2, col3 = st.columns(3)
+    def render_metric_and_chart(col, label, price, ma60, chart_data):
+        if price == 0 or chart_data is None: return
+        is_uptrend = price >= ma60
+        
+        col.metric(
+            label=label, 
+            value=f"{price:,.2f}", 
+            delta=f"60일선({ma60:,.2f}) 대비 {price - ma60:+,.2f}pt",
+            delta_color="normal" if is_uptrend else "inverse"
+        )
+        
+        chart_color = ["#FF4B4B", "#2E86C1"] if not is_uptrend else ["#00CC96", "#2E86C1"]
+        col.line_chart(chart_data, color=chart_color, height=250)
+
+    render_metric_and_chart(col1, "코스피 (KOSPI)", kospi_price, kospi_ma, kospi_chart)
+    render_metric_and_chart(col2, "코스닥 (KOSDAQ)", kosdaq_price, kosdaq_ma, kosdaq_chart)
+    render_metric_and_chart(col3, "S&P 500", sp500_price, sp500_ma, sp500_chart)
+
+with tab2:
+    st.subheader(f"독립 모멘텀 산출 및 선발 (기준일: {target_date})")
+    
+    with st.spinner('선택하신 날짜 기준으로 유니버스를 분석 중입니다...'):
+        results = []
+        for tk, nm in UNIVERSE.items():
+            res = analyze_asset(tk, nm, target_date)
+            if res: results.append(res)
+            
+        safe_results = []
+        for tk, nm in SAFE_ASSETS.items():
+            res = analyze_asset(tk, nm, target_date, is_safe=True)
+            if res: safe_results.append(res)
+
+    table_data = []
+    for r in sorted(results + safe_results, key=lambda x: x['WMS'], reverse=True):
+        status = "🛡️ 대피처(상시합격)" if r['IsSafe'] else ("🟢 합격" if r['Passed'] else "🔴 탈락")
+        if not r['Passed'] and not r['IsSafe']:
+            reasons = []
+            if not r['IsUptrend']: reasons.append("60일선 하회")
+            if not r['IsPosWMS']: reasons.append("WMS 음수")
+            status += f" ({', '.join(reasons)})"
+            
+        table_data.append({
+            "자산 구분": "안전자산" if r['IsSafe'] else "위험자산",
+            "종목명": r['Name'],
+            "기준일 종가": f"{r['Price']:,}원",
+            "WMS 스코어": f"{r['WMS']:.2f}%",
+            "60일선": f"{r['MA60']:,.0f}원",
+            "교차 검증 결과": status
+        })
+    
+    if table_data:
+        st.table(pd.DataFrame(table_data))
+    else:
+        st.error("데이터를 불러오지 못했습니다. 기준일을 변경해보세요.")
+    
+    st.divider()
     st.subheader("💰 최종 자산배분 및 매수 주수 계산기")
     
     passed_assets = [r for r in results if r["Passed"]]
     passed_assets.sort(key=lambda x: x["WMS"], reverse=True)
     
-    # ----------------------------------------------------
-    # [수정됨] 안전자산 무조건 고정 로직 
-    # WMS 비교를 없애고 TIGER 미국달러단기채권액티브(329750)를 고정 대피처로 지정
-    # ----------------------------------------------------
+    # 달러단기채권을 대피처로 무조건 고정 지정
     fixed_safe_asset = next((r for r in safe_results if r["Ticker"] == "329750"), None)
     
     portfolio = []
@@ -15,10 +187,10 @@ st.divider()
         st.success("🟢 **[리스크 온] 합격 종목 2개 이상**: WMS 1위, 2위 종목에 각각 50%씩 투자합니다.")
         portfolio = [(passed_assets[0], 0.5), (passed_assets[1], 0.5)]
     elif len(passed_assets) == 1 and fixed_safe_asset:
-        st.warning(f"🟡 **[부분 방어] 합격 종목 1개**: WMS 1위 종목(50%)과 안전자산 {fixed_safe_asset['Name']}(50%)에 분산 투자합니다.")
+        st.warning(f"🟡 **[부분 방어] 합격 종목 1개**: WMS 1위 종목(50%)과 달러현금성 자산 {fixed_safe_asset['Name']}(50%)에 분산 투자합니다.")
         portfolio = [(passed_assets[0], 0.5), (fixed_safe_asset, 0.5)]
     elif fixed_safe_asset:
-        st.error(f"🔴 **[리스크 오프] 전 세계 동반 하락장**: 안전자산 {fixed_safe_asset['Name']}에 전량(100%) 대피합니다.")
+        st.error(f"🔴 **[리스크 오프] 전 세계 동반 하락장**: 달러현금성 자산 {fixed_safe_asset['Name']}에 전량(100%) 대피합니다.")
         portfolio = [(fixed_safe_asset, 1.0)]
 
     if portfolio:
@@ -43,3 +215,5 @@ st.divider()
                     st.write(f"- **{asset['Name']}**: {shares:,}주 매수 (지정가: {target_price:,}원) ➔ 투입 금액: {cost:,}원")
                     
             st.info(f"단수주 발생에 따른 최종 잔여 현금: {int(total_cash - used_cash):,}원")
+
+```
