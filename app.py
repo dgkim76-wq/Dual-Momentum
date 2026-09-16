@@ -1,10 +1,3 @@
-도경님, 파이썬(Python)은 코드의 들여쓰기(띄어쓰기 공간)에 매우 민감한 언어입니다. 부분 코드를 복사해서 기존 코드의 중간에 붙여넣는 과정에서 **줄 맞춤(Indentation)이 어긋나서 발생한 오류**입니다.
-
-이러한 들여쓰기 충돌을 가장 깔끔하고 확실하게 해결하기 위해, 방금 확정한 **'달러단기채권 대피 고정 로직'까지 모두 포함된 `app.py` 전체 완성본 코드**를 제공해 드립니다.
-
-기존 `app.py` 화면에서 `Ctrl + A`를 눌러 전체를 선택하고 삭제(`Delete`)하신 뒤, 아래의 코드를 처음부터 끝까지 통째로 복사해서 붙여넣고 저장(`Ctrl + S`)해 주십시오.
-
-```python
 import streamlit as st
 import pandas as pd
 import FinanceDataReader as fdr
@@ -215,5 +208,3 @@ with tab2:
                     st.write(f"- **{asset['Name']}**: {shares:,}주 매수 (지정가: {target_price:,}원) ➔ 투입 금액: {cost:,}원")
                     
             st.info(f"단수주 발생에 따른 최종 잔여 현금: {int(total_cash - used_cash):,}원")
-
-```
