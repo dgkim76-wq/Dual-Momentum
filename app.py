@@ -3,150 +3,184 @@ import pandas as pd
 import FinanceDataReader as fdr
 from datetime import datetime
 
-# --- 실시간 지수 및 60일선 수집 함수 ---
+# ----------------------------------------------------
+# 1. 환경 설정 및 유니버스 정의
+# ----------------------------------------------------
+st.set_page_config(page_title="듀얼 모멘텀 실행기", layout="wide")
+
+UNIVERSE = {
+    "266370": "KODEX 200IT",
+    "411060": "ACE KRX금현물",
+    "360200": "TIGER 미국S&P500",
+    "380340": "TIGER 인도니프티50"
+}
+SAFE_TICKER = "329750"
+SAFE_NAME = "TIGER 미국달러단기채권액티브"
+
+# ----------------------------------------------------
+# 2. 실시간 데이터 수집 및 WMS 연산 엔진
+# ----------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_market_timing(ticker):
     try:
         df = fdr.DataReader(ticker).tail(150)
-        if df.empty:
-            return 0.0, 0.0
-        
+        if df.empty: return 0.0, 0.0
         df['MA60'] = df['Close'].rolling(window=60).mean()
-        latest_close = float(df['Close'].iloc[-1])
-        latest_ma60 = float(df['MA60'].dropna().iloc[-1])
-        return latest_close, latest_ma60
+        return float(df['Close'].iloc[-1]), float(df['MA60'].dropna().iloc[-1])
     except:
         return 0.0, 0.0
 
-# --- 개별 종목 전일 종가 자동 수집 함수 ---
 @st.cache_data(ttl=3600)
-def get_latest_close_price(ticker):
+def analyze_asset(ticker, name, is_safe=False):
     try:
-        df = fdr.DataReader(ticker).tail(1)
-        if not df.empty:
-            return int(df['Close'].iloc[0])
-        return 0
-    except:
-        return 0
+        # 1년(약 252 거래일)치 데이터 수집
+        df = fdr.DataReader(ticker).tail(260)
+        if df.empty or len(df) < 60: return None
+            
+        current_price = int(df['Close'].iloc[-1])
+        ma60 = df['Close'].rolling(window=60).mean().iloc[-1]
+        
+        # 특정 기간 전 대비 수익률 계산 함수 (3M≈63일, 6M≈126일, 9M≈189일, 12M≈252일)
+        def get_return(days):
+            if len(df) > days:
+                past_price = df['Close'].iloc[-days-1]
+                return ((current_price - past_price) / past_price) * 100
+            return 0.0
+            
+        ret_3m = get_return(63)
+        ret_6m = get_return(126)
+        ret_9m = get_return(189)
+        ret_12m = get_return(252)
+        
+        # 가중 모멘텀 스코어 (WMS) 계산
+        wms = (ret_3m * 9 + ret_6m * 6 + ret_9m * 3 + ret_12m * 1) / 19
+        
+        # 교차 검증 (절대 모멘텀)
+        is_uptrend = current_price >= ma60
+        is_positive_wms = wms > 0
+        
+        # 안전자산은 필터 무조건 통과 (대피처 역할), 위험자산은 두 조건 모두 충족해야 합격
+        passed = True if is_safe else (is_uptrend and is_positive_wms)
 
-st.set_page_config(page_title="듀얼 모멘텀 리밸런싱", layout="wide")
+        return {
+            "Ticker": ticker, "Name": name, "Price": current_price, "MA60": ma60,
+            "Ret_3M": ret_3m, "WMS": wms, "Passed": passed,
+            "IsUptrend": is_uptrend, "IsPosWMS": is_positive_wms
+        }
+    except:
+        return None
+
+# ----------------------------------------------------
+# 3. 사이드바 및 레이아웃 구성
+# ----------------------------------------------------
 st.title("📈 듀얼 모멘텀 & 마켓 타이밍 실행기")
 
-tab1, tab2 = st.tabs(["🔴 일일 리스크 체크", "📅 월간 리밸런싱"])
-
-# --- 사이드바 ---
 st.sidebar.header("포트폴리오 기초 설정")
 target_date = st.sidebar.date_input("리밸런싱 기준일", datetime.today())
+total_cash = st.sidebar.number_input("매수 가능 예수금 (원)", min_value=0, value=10000000, step=1000000)
+st.sidebar.success(f"설정 금액: **{total_cash:,} 원**")
 
-st.sidebar.markdown("**유안타증권(TRADER) 매수 가능 예수금**")
-st.sidebar.caption("숫자만 입력 후 Enter를 누르세요. (예: 10000000)")
-total_cash = st.sidebar.number_input("단위: 원", min_value=0, value=110000000, step=1000000, label_visibility="collapsed")
-st.sidebar.success(f"현재 설정 금액: **{total_cash:,} 원**")
+tab1, tab2 = st.tabs(["🔴 일일 리스크 체크 (시장 전체 추세)", "📅 월간 리밸런싱 (동적 자산배분 실행)"])
 
-# 데이터 수집 (지수)
-with st.spinner('실시간 지수 데이터를 불러오는 중입니다...'):
-    kospi_price, kospi_ma = get_market_timing("KS11")
-    kosdaq_price, kosdaq_ma = get_market_timing("KQ11")
-    sp500_price, sp500_ma = get_market_timing("US500")
-
-# 데이터 수집 (개별 종목 전일 종가 세팅)
-# 266370: KODEX 200 정보기술, 411060: ACE KRX금현물, 329750: TIGER 미국달러단기채권액티브
-default_it = get_latest_close_price("266370") or 55885
-default_gold = get_latest_close_price("411060") or 26490
-default_safe = get_latest_close_price("329750") or 51200
-
-# --- Tab 1: 일일 리스크 체크 ---
+# ----------------------------------------------------
+# 4. Tab 1: 시장 타이밍 지표
+# ----------------------------------------------------
 with tab1:
-    st.subheader("마켓 타이밍 60일선 (중기 수급선) 필터")
-    st.info("💡 **교차 검증 재진입 로직**: 현재 지수가 60일선을 상회하고, 매수 대상의 가중 모멘텀(WMS)이 0 초과일 때만 위험자산(주식)에 진입합니다. 조건 미달 시 안전자산(달러단기채 등)으로 대피합니다.")
-    
+    st.subheader("글로벌 주요 지수 60일선 필터")
+    with st.spinner('실시간 지수 데이터를 불러오는 중입니다...'):
+        kospi_price, kospi_ma = get_market_timing("KS11")
+        kosdaq_price, kosdaq_ma = get_market_timing("KQ11")
+        sp500_price, sp500_ma = get_market_timing("US500")
+
     col1, col2, col3 = st.columns(3)
-    
     def render_metric(col, label, price, ma60):
-        if price == 0:
-            col.metric(label=label, value="데이터 오류", delta="수집 불가")
-            return
-            
+        if price == 0: return
         is_uptrend = price >= ma60
-        status = "🟢 진입/유지 가능" if is_uptrend else "🔴 현금화/안전자산 대피"
-        diff = price - ma60
-        delta_color = "normal" if is_uptrend else "inverse"
-        
         col.metric(
             label=label, 
             value=f"{price:,.2f}", 
-            delta=f"60일선({ma60:,.2f}) 대비 {diff:+,.2f}pt",
-            delta_color=delta_color
+            delta=f"60일선({ma60:,.2f}) 대비 {price - ma60:+,.2f}pt",
+            delta_color="normal" if is_uptrend else "inverse"
         )
-        
-        if not is_uptrend:
-            col.warning(f"⚠️ 재진입 조건: 지수가 {ma60:,.2f}pt를 재돌파하고\n1위 종목 WMS가 양수(+)일 때")
-
     render_metric(col1, "코스피 (KOSPI)", kospi_price, kospi_ma)
     render_metric(col2, "코스닥 (KOSDAQ)", kosdaq_price, kosdaq_ma)
     render_metric(col3, "S&P 500", sp500_price, sp500_ma)
 
-# --- Tab 2: 월간 리밸런싱 ---
+# ----------------------------------------------------
+# 5. Tab 2: 월간 리밸런싱 및 실전 매수 계산기
+# ----------------------------------------------------
 with tab2:
-    st.subheader("모멘텀 산출 및 매수 주수 계산")
+    st.subheader("실시간 독립 모멘텀 산출 및 합격 종목 선발")
     
-    with st.expander("💡 가중 모멘텀 스코어(WMS) 및 교차 검증 계산식"):
-        st.markdown("""
-        * **가중 모멘텀(WMS)**: `(3개월 수익률×9 + 6개월 수익률×6 + 9개월 수익률×3 + 12개월 수익률×1) / 19`
-        * **매수 조건 (교차 검증)**: 타겟 지수가 60일선 위에 위치 **AND** 1위 종목의 WMS 스코어가 0 초과일 것.
-        * **안전자산 대피**: 위 교차 검증을 충족하지 못할 경우, 하락장 방어를 위해 **TIGER 미국달러단기채권액티브** 등 안전자산으로 100% 리밸런싱합니다.
-        """)
-        
-    st.write("**📊 전체 유니버스 가중 모멘텀 현황 (시뮬레이션 - 현 시장 상황 반영)**")
-    st.markdown("""
-    | 순위 | 자산군 | 종목명 | WMS 스코어 | 3개월 수익률 | 60일선 필터 | 최종 판정 |
-    |---|---|---|---|---|---|---|
-    | **1위** | 국내주식 | **KODEX 200IT** | **8.2%** | 8.5% | 🔴 이탈 (코스피) | **매수 보류 (조건 미달)** |
-    | **2위** | 원자재 | **ACE KRX금현물** | **5.4%** | 4.2% | - | **매수 보류 (조건 미달)** |
-    | 3위 | 미국주식 | TIGER 미국S&P500 | 2.5% | 2.1% | 🟢 통과 | - |
-    | 4위 | 수비자산 | TIGER 미국달러단기채권액티브 | 0.8% | 0.5% | - | **대피처 매수 (100%)** |
-    | 5위 | 신흥국 | TIGER 인도니프티50 | -0.5% | -1.2% | - | - |
-    """)
+    with st.spinner('전체 유니버스의 1년치 주가를 분석하여 WMS를 계산 중입니다...'):
+        # 유니버스 분석 실행
+        results = []
+        for tk, nm in UNIVERSE.items():
+            res = analyze_asset(tk, nm)
+            if res: results.append(res)
+            
+        safe_res = analyze_asset(SAFE_TICKER, SAFE_NAME, is_safe=True)
+
+    # UI 표 구성을 위한 데이터 전처리
+    table_data = []
+    for r in sorted(results, key=lambda x: x['WMS'], reverse=True):
+        status = "🟢 합격" if r['Passed'] else "🔴 탈락"
+        if not r['Passed']:
+            reasons = []
+            if not r['IsUptrend']: reasons.append("60일선 하회")
+            if not r['IsPosWMS']: reasons.append("WMS 음수")
+            status += f" ({', '.join(reasons)})"
+            
+        table_data.append({
+            "종목명": r['Name'],
+            "현재가": f"{r['Price']:,}원",
+            "WMS 스코어": f"{r['WMS']:.2f}%",
+            "60일선": f"{r['MA60']:,.0f}원",
+            "교차 검증 결과": status
+        })
+    st.table(pd.DataFrame(table_data))
     
+    # ----------------------------------------------------
+    # 6. 포트폴리오 비중 결정 로직
+    # ----------------------------------------------------
     st.divider()
-    st.write("**💰 실전 매수 계산기 (전일 종가 자동 연동)**")
+    st.subheader("💰 최종 자산배분 및 매수 주수 계산기")
     
-    market_status = st.radio(
-        "현재 교차 검증(마켓 타이밍 60일선 + WMS) 결과는 어떻습니까?",
-        ("🔴 매수 조건 미달 (안전자산 전량 대피)", "🟢 매수 조건 충족 (주식/원자재 듀얼 모멘텀 진행)")
-    )
+    passed_assets = [r for r in results if r["Passed"]]
+    passed_assets.sort(key=lambda x: x["WMS"], reverse=True) # WMS 순위 정렬
     
-    if market_status == "🟢 매수 조건 충족 (주식/원자재 듀얼 모멘텀 진행)":
-        col4, col5 = st.columns(2)
-        with col4:
-            price_1 = st.number_input("1위 KODEX 200IT 매도 1호가 (기본값: 전일종가)", min_value=0, step=5, value=default_it)
-        with col5:
-            price_2 = st.number_input("2위 ACE KRX금현물 매도 1호가 (기본값: 전일종가)", min_value=0, step=5, value=default_gold)
-            
-        if st.button("실행 계획 계산하기", key="btn1"):
-            if price_1 > 0 and price_2 > 0:
-                alloc_amt = total_cash * 0.5
-                shares_1 = int(alloc_amt // price_1)
-                shares_2 = int(alloc_amt // price_2)
-                
-                st.success("✅ [리스크 온] 주식/위험자산 매수 계획 산출 완료")
-                st.write(f"- **KODEX 200IT (50%)**: {shares_1}주 매수 (기준가: {price_1:,}원)")
-                st.write(f"- **ACE KRX금현물 (50%)**: {shares_2}주 매수 (기준가: {price_2:,}원)")
-                
-                remain_cash = total_cash - ((shares_1 * price_1) + (shares_2 * price_2))
-                st.info(f"단수주 발생에 따른 잔여 현금: {int(remain_cash):,}원")
-                
+    portfolio = []
+    if len(passed_assets) >= 2:
+        st.success("🟢 **[리스크 온] 합격 종목 2개 이상**: WMS 1위, 2위 종목에 각각 50%씩 투자합니다.")
+        portfolio = [(passed_assets[0], 0.5), (passed_assets[1], 0.5)]
+    elif len(passed_assets) == 1:
+        st.warning("🟡 **[부분 방어] 합격 종목 1개**: WMS 1위 종목(50%)과 안전자산(50%)에 분산 투자합니다.")
+        portfolio = [(passed_assets[0], 0.5), (safe_res, 0.5)]
     else:
-        col_safe, _ = st.columns(2)
-        with col_safe:
-            price_safe = st.number_input("수비자산 TIGER 미국달러단기채권액티브 1호가 (기본값: 전일종가)", min_value=0, step=5, value=default_safe)
+        st.error("🔴 **[리스크 오프] 전 세계 동반 하락장**: 모든 자산이 탈락하여 안전자산에 전량(100%) 대피합니다.")
+        portfolio = [(safe_res, 1.0)]
+
+    # ----------------------------------------------------
+    # 7. 동적 입력창 및 결과 출력
+    # ----------------------------------------------------
+    cols = st.columns(len(portfolio))
+    inputs = []
+    
+    for i, (asset, weight) in enumerate(portfolio):
+        with cols[i]:
+            target_price = st.number_input(f"{asset['Name']} 매수호가 (비중 {int(weight*100)}%)", 
+                                           value=int(asset['Price']), step=5, key=f"input_{i}")
+            inputs.append((asset, weight, target_price))
             
-        if st.button("실행 계획 계산하기", key="btn2"):
-            if price_safe > 0:
-                shares_safe = int(total_cash // price_safe)
+    if st.button("최종 실행 계획 산출"):
+        st.markdown("### 🛒 매수 지시서")
+        used_cash = 0
+        for asset, weight, target_price in inputs:
+            if target_price > 0:
+                alloc_amt = total_cash * weight
+                shares = int(alloc_amt // target_price)
+                cost = shares * target_price
+                used_cash += cost
+                st.write(f"- **{asset['Name']}**: {shares:,}주 매수 (지정가: {target_price:,}원) ➔ 투입 금액: {cost:,}원")
                 
-                st.error("🚨 [리스크 오프] 하락장 방어: 안전자산 전량(100%) 대피")
-                st.write(f"- **TIGER 미국달러단기채권액티브 (100%)**: {shares_safe}주 매수 (기준가: {price_safe:,}원)")
-                
-                remain_cash = total_cash - (shares_safe * price_safe)
-                st.info(f"단수주 발생에 따른 잔여 현금: {int(remain_cash):,}원")
+        st.info(f"단수주 발생에 따른 최종 잔여 현금: {int(total_cash - used_cash):,}원")
